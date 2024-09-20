@@ -24,6 +24,7 @@ except (ImportError, ModuleNotFoundError) as e:
 import fnmatch
 import logging
 import os
+import concurrent.futures
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Type, Union
@@ -94,6 +95,37 @@ class _ExcludingLocalFilesystem(LocalFileSystem):
         else:
             return [path for path in paths if not self._should_exclude(path)]
 
+def _pyarrow_fs_copy_file(source, destination, source_filesystem=None, destination_filesystem=None):
+    with source_filesystem.open_input_file(source) as source_file:
+        with destination_filesystem.open_output_stream(destination) as dest:
+            shutil.copyfileobj(source_file, dest)
+
+# def copy_directory_recursively(source, destination, source_filesystem=None, destination_filesystem=None, num_threads=4):
+#     source_filesystem, source = pyarrow.fs._resolve_filesystem_and_path(source, source_filesystem)
+#     destination_filesystem, destination = pyarrow.fs._resolve_filesystem_and_path(destination, destination_filesystem)
+#     selector = pyarrow.fs.FileSelector(source, recursive=True)
+#     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+#         futures = []
+#         for info in source_filesystem.get_file_info(selector):
+#             source_path = info.path
+#             destination_path = os.path.join(destination, os.path.relpath(source_path, source))
+#             if info.is_file:
+#                 futures.append(executor.submit(_pyarrow_fs_copy_file, source_path, destination_path, source_filesystem, destination_filesystem))
+#             else:
+#                 destination_filesystem.create_dir(destination_path, recursive=True)
+#         concurrent.futures.wait(futures)
+
+def copy_directory_recursively(source, destination, source_filesystem=None, destination_filesystem=None):
+    source_filesystem, source = pyarrow.fs._resolve_filesystem_and_path(source, source_filesystem)
+    destination_filesystem, destination = pyarrow.fs._resolve_filesystem_and_path(destination, destination_filesystem)
+    selector = pyarrow.fs.FileSelector(source, recursive=True)
+    for info in source_filesystem.get_file_info(selector):
+        source_path = info.path
+        destination_path = os.path.join(destination, os.path.relpath(source_path, source))
+        if info.is_file:
+            _pyarrow_fs_copy_file(source_path, destination_path, source_filesystem, destination_filesystem)
+        else:
+            destination_filesystem.create_dir(destination_path, recursive=True)
 
 def _pyarrow_fs_copy_files(
     source, destination, source_filesystem=None, destination_filesystem=None, **kwargs
@@ -103,7 +135,9 @@ def _pyarrow_fs_copy_files(
         # is safe for download, just not for uploads, see:
         # https://github.com/apache/arrow/issues/32372
         kwargs.setdefault("use_threads", False)
-
+    elif isinstance(destination_filesystem, pyarrow.fs.PyFileSystem):
+        copy_directory_recursively(source, destination, source_filesystem, destination_filesystem)
+        return
     # Use a large chunk size to speed up large checkpoint transfers.
     kwargs.setdefault("chunk_size", 64 * 1024 * 1024)
 
